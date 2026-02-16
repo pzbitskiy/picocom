@@ -148,9 +148,10 @@ message:
 
     Terminal is ready
 
-From now on, every character you type is sent to the serial port, and
-every character received from the serial port is sent ro your
-terminal.  Including control and special characters. Assuming that
+From now on, every character you type is sent to the serial port by
+default (or, with `--input-mode line`, only after you press Enter),
+and every character received from the serial port is sent ro your
+terminal. Including control and special characters. Assuming that
 there is nothing connected to the other end of your serial port, to
 respond to the characters you send to it (e.g. echo them back to you),
 then nothing that you type in picocom will appear on your

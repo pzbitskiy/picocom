@@ -285,7 +285,7 @@ _picocom()
     
     opts=( --baud --flow --databits --stopbits --parity \
            --lower-rts --lower-dtr --raise-rts --raise-dtr \
-           --imap --omap --emap
+           --imap --omap --emap --input-mode \
            --echo --initstring \
            --noinit --noreset --hangup \
            --receive-cmd --send-cmd \
@@ -355,6 +355,10 @@ _picocom()
                # This only works for bash-4.4 and newer
                compopt -o nosort > /dev/null 2>&1
             fi
+            return 0
+            ;;
+        --input-mode)
+            COMPREPLY=( $(compgen -W "char line" -- "$cur") )
             return 0
             ;;
         -v | --receive-cmd | -s | --send-cmd)

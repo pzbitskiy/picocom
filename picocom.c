@@ -78,6 +78,18 @@ const char *flow_str[] = {
     [FC_ERROR] = "invalid flow control mode",
 };
 
+enum input_mode_e {
+    IM_CHAR,
+    IM_LINE,
+    IM_ERROR
+};
+
+const char *input_mode_str[] = {
+    [IM_CHAR] = "char",
+    [IM_LINE] = "line",
+    [IM_ERROR] = "invalid input mode",
+};
+
 /**********************************************************************/
 
 /* control-key to printable character (lowcase) */
@@ -187,6 +199,16 @@ print_map (int flags)
     printf("\n");
 }
 
+enum input_mode_e
+parse_input_mode (const char *s)
+{
+    if ( strcmp(s, "char") == 0 )
+        return IM_CHAR;
+    if ( strcmp(s, "line") == 0 )
+        return IM_LINE;
+    return IM_ERROR;
+}
+
 /**********************************************************************/
 
 struct {
@@ -210,6 +232,7 @@ struct {
     int imap;
     int omap;
     int emap;
+    enum input_mode_e input_mode;
     char *log_filename;
     char *initstring;
     int exit_after;
@@ -240,6 +263,7 @@ struct {
     .imap = M_I_DFL,
     .omap = M_O_DFL,
     .emap = M_E_DFL,
+    .input_mode = IM_CHAR,
     .log_filename = NULL,
     .initstring = NULL,
     .exit_after = -1,
@@ -277,6 +301,20 @@ struct tty_q {
 } tty_q = {
     .sz = 0,
     .len = 0,
+    .buff = NULL
+};
+
+#define LINE_Q_SZ_MIN 256
+
+struct line_q {
+    int sz;
+    int len;
+    int send_len;
+    unsigned char *buff;
+} line_q = {
+    .sz = 0,
+    .len = 0,
+    .send_len = 0,
     .buff = NULL
 };
 
@@ -1180,7 +1218,9 @@ run_cmd(int fd, const char *cmd, const char *args_extra)
 
 /**********************************************************************/
 
-int tty_q_push(const char *s, int len) {
+int
+tty_q_push_i(const char *s, int len, int do_echo)
+{
     int i, sz, n;
     unsigned char *b;
 
@@ -1202,11 +1242,81 @@ int tty_q_push(const char *s, int len) {
                    opts.omap, s[i]);
         tty_q.len += n;
         /* write to STO if local-echo is enabled */
-        if ( opts.lecho )
+        if ( do_echo && opts.lecho )
             map_and_write(STO, opts.emap, s[i]);
     }
 
     return i;
+}
+
+int
+tty_q_push(const char *s, int len)
+{
+    return tty_q_push_i(s, len, 1);
+}
+
+int
+tty_q_push_necho(const char *s, int len)
+{
+    return tty_q_push_i(s, len, 0);
+}
+
+int
+line_q_push(unsigned char c)
+{
+    int sz;
+    unsigned char *b;
+
+    while (line_q.len + 1 > line_q.sz) {
+        sz = line_q.sz ? line_q.sz * 2 : LINE_Q_SZ_MIN;
+        b = realloc(line_q.buff, sz);
+        if ( ! b )
+            return 0;
+        line_q.buff = b;
+        line_q.sz = sz;
+    }
+
+    line_q.buff[line_q.len++] = c;
+    if ( opts.lecho )
+        map_and_write(STO, opts.emap, c);
+    if ( c == '\r' || c == '\n' )
+        line_q.send_len = line_q.len;
+
+    return 1;
+}
+
+void
+line_q_ready_all(void)
+{
+    line_q.send_len = line_q.len;
+}
+
+int
+line_q_flush(void)
+{
+    int n;
+
+    if ( line_q.send_len == 0 )
+        return 0;
+
+    n = tty_q_push_necho((char *)line_q.buff, line_q.send_len);
+    if ( n <= 0 )
+        return n;
+
+    memmove(line_q.buff, line_q.buff + n, line_q.len - n);
+    line_q.len -= n;
+    line_q.send_len -= n;
+
+    return n;
+}
+
+int
+queue_stdin_char(unsigned char c)
+{
+    if ( opts.input_mode == IM_LINE )
+        return line_q_push(c);
+
+    return tty_q_push((char *)&c, 1) == 1;
 }
 
 /* Process command key. Returns non-zero if command results in picocom
@@ -1424,6 +1534,9 @@ loop(void)
     while ( ! sig_exit ) {
         struct timeval tv, *ptv;
 
+        if ( opts.input_mode == IM_LINE && line_q.send_len > 0 )
+            line_q_flush();
+
         ptv = NULL;
         FD_ZERO(&rdset);
         FD_ZERO(&wrset);
@@ -1431,6 +1544,8 @@ loop(void)
         if ( ! opts.exit ) FD_SET(tty_fd, &rdset);
         if ( tty_q.len ) {
             FD_SET(tty_fd, &wrset);
+        } else if ( opts.input_mode == IM_LINE && line_q.send_len > 0 ) {
+            /* Pending locally buffered input to be queued for sending. */
         } else {
             if ( opts.exit_after >= 0 ) {
                 msec2tv(&tv, opts.exit_after);
@@ -1464,6 +1579,10 @@ loop(void)
                 n = read(STI, buff_rd, sizeof(buff_rd));
             } while (n < 0 && errno == EINTR);
             if (n == 0) {
+                if ( opts.input_mode == IM_LINE ) {
+                    line_q_ready_all();
+                    line_q_flush();
+                }
                 stdin_closed = 1;
                 pinfo("\r\n** read zero bytes from stdin **\r\n");
                 goto skip_proc_STI;
@@ -1481,7 +1600,7 @@ loop(void)
                 case ST_COMMAND:
                     if ( c == opts.escape ) {
                         /* pass the escape character down */
-                        if ( tty_q_push((char *)&c, 1) != 1 )
+                        if ( ! queue_stdin_char(c) )
                             fd_printf(STO, "\x07");
                     } else {
                         /* process command key */
@@ -1495,7 +1614,7 @@ loop(void)
                     if ( ! opts.noescape && c == opts.escape )
                         state = ST_COMMAND;
                     else
-                        if ( tty_q_push((char *)&c, 1) != 1 )
+                        if ( ! queue_stdin_char(c) )
                             fd_printf(STO, "\x07");
                     break;
                 default:
@@ -1503,6 +1622,8 @@ loop(void)
                     break;
                 }
             }
+            if ( opts.input_mode == IM_LINE )
+                line_q_flush();
         }
     skip_proc_STI:
 
@@ -1649,6 +1770,7 @@ show_usage(char *name)
     printf("  --imap <map> (input mappings)\n");
     printf("  --omap <map> (output mappings)\n");
     printf("  --emap <map> (local-echo mappings)\n");
+    printf("  --input-mode char | line\n");
     printf("  --lo<g>file <filename>\n");
     printf("  --inits<t>ring <string>\n");
     printf("  --e<x>it-after <msec>\n");
@@ -1696,6 +1818,7 @@ parse_args(int argc, char *argv[])
         {"imap", required_argument, 0, 'I' },
         {"omap", required_argument, 0, 'O' },
         {"emap", required_argument, 0, 'E' },
+        {"input-mode", required_argument, 0, 5 },
         {"escape", required_argument, 0, 'e'},
         {"no-escape", no_argument, 0, 'n'},
         {"echo", no_argument, 0, 'c'},
@@ -1760,6 +1883,13 @@ parse_args(int argc, char *argv[])
             map = parse_map(optarg);
             if (map >= 0) opts.emap = map;
             else { fprintf(stderr, "Invalid --emap\n"); r = -1; }
+            break;
+        case 5:
+            opts.input_mode = parse_input_mode(optarg);
+            if ( opts.input_mode == IM_ERROR ) {
+                fprintf(stderr, "Invalid --input-mode: %s\n", optarg);
+                r = -1;
+            }
             break;
         case 'c':
             opts.lecho = 1;
@@ -1978,6 +2108,7 @@ parse_args(int argc, char *argv[])
     printf("imap is        : "); print_map(opts.imap);
     printf("omap is        : "); print_map(opts.omap);
     printf("emap is        : "); print_map(opts.emap);
+    printf("input mode is  : %s\n", input_mode_str[opts.input_mode]);
     printf("logfile is     : %s\n", opts.log_filename ? opts.log_filename : "none");
     if ( opts.initstring ) {
         printf("initstring len : %lu bytes\n",

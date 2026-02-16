@@ -40,7 +40,9 @@ just opened. Following this, if standard input is a tty, picocom sets
 the tty to raw mode. Then it goes in a loop where it listens for input
 from stdin, or from the serial port. Input from the serial port is
 copied to the standard output while input from the standard input is
-copied to the serial port. Picocom also scans its input stream for a
+copied to the serial port. If **--input-mode line** is given, then
+input from the terminal is buffered locally and sent to the serial
+port only after Enter is pressed. Picocom also scans its input stream for a
 user-specified control character, called the _escape character_ (being
 by default **C-a**). If the escape character is seen, then instead of
 sending it to the serial-device, the program enters "command mode" and
@@ -337,6 +339,13 @@ Picocom accepts the following command-line options.
     be replaced before being echoed-back to the terminal, if
     local-echo is enabled). See
     **[INPUT, OUTPUT, AND ECHO MAPPING]**. (Defaul: **delbs,crcrlf**)
+
+**--input-mode**
+
+:   Specifies how terminal input is sent to the serial port. **char**
+    sends every character immediately (the default behavior). **line**
+    buffers input locally and sends it when Enter is pressed.
+    (Default: **char**)
 
 **--logfile** | **-g**
 
